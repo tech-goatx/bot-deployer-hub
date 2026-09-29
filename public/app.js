@@ -236,27 +236,31 @@ async function confirmRestart() {
 
   const apiKey = getApiKey();
   closeRestartModal();
-  showToast('Restarting ' + apps.length + ' app(s)...', 'warning');
+  showToast('Pushing latest code...', 'warning');
 
   try {
-    const githubEl = document.getElementById('githubRepo');
-    const githubRepo = githubEl ? githubEl.value.trim() : '';
-    const tokenEl = document.getElementById('githubToken');
-    const githubToken = tokenEl ? tokenEl.value.trim() : '';
     const response = await axios.post('/api/manager/restart-bot-apps', {
       herokuApiKey: apiKey,
-      appNames: apps,
-      githubRepo: githubRepo,
-      githubToken: githubToken
+      appNames: apps
     }, { timeout: 900000 });
-    if (response.data.success) {
-      showToast(response.data.message);
+    const data = response.data || {};
+    const errs = data.errors || [];
+    if (data.success) {
+      showToast(data.message);
       setTimeout(function () { document.getElementById('loadAppsBtn').click(); }, 2000);
+    } else if (errs.length) {
+      showToast(errs.map(function (e) { return (e.appName || '') + ': ' + (e.error || ''); }).join(' | '), 'error');
     } else {
-      showToast(response.data.error || response.data.message || 'Failed to restart', 'error');
+      showToast(data.error || data.message || 'Failed to push', 'error');
     }
   } catch (error) {
-    showToast('Failed to restart apps', 'error');
+    const data = (error.response && error.response.data) || {};
+    const errs = data.errors || [];
+    if (errs.length) {
+      showToast(errs.map(function (e) { return (e.appName || '') + ': ' + (e.error || ''); }).join(' | '), 'error');
+    } else {
+      showToast(data.error || data.message || error.message || 'Failed to push GitHub changes', 'error');
+    }
   }
 }
 
@@ -559,8 +563,6 @@ if (venomForm) {
 
     const githubRepo = document.getElementById('githubRepo').value.trim();
     const herokuApiKey = document.getElementById('venomApiKey').value.trim();
-    const githubTokenEl = document.getElementById('githubToken');
-    const githubToken = githubTokenEl ? githubTokenEl.value.trim() : '';
     const baseAppName = document.getElementById('baseAppName').value.trim();
     const mongodbUrl = document.getElementById('mongodbUrl').value.trim();
     const dbName = document.getElementById('dbName').value.trim();
@@ -589,7 +591,6 @@ if (venomForm) {
       const response = await axios.post('/venom/deploy-apps', {
         githubRepo: githubRepo,
         herokuApiKey: herokuApiKey,
-        githubToken: githubToken,
         baseAppName: baseAppName,
         mongodbUrl: mongodbUrl,
         dbName: dbName,

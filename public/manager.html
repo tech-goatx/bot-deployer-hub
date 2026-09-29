@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=5">
+  <link rel="stylesheet" href="/styles.css?v=9">
 </head>
 <body>
   <div class="bg-gradient"></div>
@@ -68,7 +68,7 @@
             <label for="selectAllApps">Select All Apps</label>
             <div class="action-buttons">
               <button class="btn-sm btn-info" onclick="copySelectedUrls()"><i class="fas fa-copy"></i> Copy URLs</button>
-              <button class="btn-sm btn-warning" onclick="restartSelectedApps()"><i class="fas fa-sync-alt"></i> Restart</button>
+              <button class="btn-sm btn-warning" onclick="restartSelectedApps()"><i class="fas fa-sync-alt"></i> Push</button>
               <button class="btn-sm btn-danger" onclick="deleteSelectedApps()"><i class="fas fa-trash"></i> Delete</button>
             </div>
           </div>
@@ -102,12 +102,12 @@
   <div class="modal" id="restartModal">
     <div class="modal-content">
       <div class="modal-header">
-        <h2 class="modal-title"><i class="fas fa-sync-alt"></i> Restart Apps</h2>
+        <h2 class="modal-title"><i class="fas fa-sync-alt"></i> Push GitHub Changes</h2>
         <button class="close-modal" onclick="closeRestartModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="modal-message">Push latest GitHub changes and restart <span id="restartCount" style="color:#c8c8c8;font-weight:600;">0</span> app(s)</p>
-        <button class="modal-btn" onclick="confirmRestart()"><i class="fas fa-sync-alt"></i> Confirm Restart</button>
+        <p class="modal-message">Latest GitHub code push karke restart karo <span id="restartCount" style="color:#c8c8c8;font-weight:600;">0</span> app(s)</p>
+        <button class="modal-btn" onclick="confirmRestart()"><i class="fas fa-sync-alt"></i> Confirm Push</button>
         <button class="modal-btn modal-btn-secondary" onclick="closeRestartModal()"><i class="fas fa-times"></i> Cancel</button>
       </div>
     </div>
@@ -171,6 +171,6 @@
     <span id="toastMessage">Operation completed</span>
   </div>
 
-  <script src="/app.js?v=5"></script>
+  <script src="/app.js?v=11"></script>
 </body>
 </html>
