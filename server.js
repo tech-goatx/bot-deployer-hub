@@ -64,6 +64,30 @@ function sanitizeName(name) {
     .slice(0, 28);
 }
 
+function parseAppNameStart(rawName) {
+  const base = sanitizeName(rawName);
+  const match = base.match(/^(.*?)(\d+)$/);
+  if (match) {
+    const start = parseInt(match[2], 10);
+    if (Number.isFinite(start) && start >= 0) {
+      return { prefix: match[1], start: start };
+    }
+  }
+  return { prefix: base, start: 1 };
+}
+
+async function herokuAppExists(client, appName) {
+  try {
+    await client.get('/apps/' + encodeURIComponent(appName));
+    return true;
+  } catch (err) {
+    const status = err.response && err.response.status;
+    if (status === 404) return false;
+    if (status === 403) return true;
+    throw err;
+  }
+}
+
 function herokuWebUrl(app) {
   const url = app && app.web_url ? String(app.web_url).replace(/\/$/, '') : '';
   if (url) return url;
@@ -73,13 +97,47 @@ function herokuWebUrl(app) {
 
 function parseGithubRepo(input) {
   const raw = String(input || '').trim();
-  const match = raw.match(/github\.com[/:]([^/]+)\/([^/#?]+)/i);
+  if (!raw) return null;
+  const match = raw.match(/(?:github\.com|codeload\.github\.com)[/:]([^/]+)\/([^/#?\s]+)/i);
   if (match) {
     return { owner: match[1], repo: match[2].replace(/\.git$/i, '') };
   }
+  const api = raw.match(/api\.github\.com\/repos\/([^/]+)\/([^/#?\s]+)/i);
+  if (api) {
+    return { owner: api[1], repo: api[2].replace(/\.git$/i, '') };
+  }
   const short = raw.match(/^([^/\s]+)\/([^/#?\s]+)$/);
-  if (short) {
+  if (short && !short[1].includes('.') && short[2]) {
     return { owner: short[1], repo: short[2].replace(/\.git$/i, '') };
+  }
+  return null;
+}
+
+function findGithubInValue(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') return parseGithubRepo(value);
+  if (typeof value !== 'object') return null;
+  const owner = value.org || value.owner || value.repoOwner || value.gitOwner || value.login;
+  const repo = value.repo || value.repository || value.repo_name || value.repoName || value.name;
+  if (owner && repo && typeof repo === 'string' && !String(repo).includes('/')) {
+    return { owner: String(owner), repo: String(repo).replace(/\.git$/i, '') };
+  }
+  if (typeof repo === 'string' && repo.includes('/')) {
+    const parsed = parseGithubRepo(repo);
+    if (parsed) return parsed;
+  }
+  return parseGithubRepo(JSON.stringify(value));
+}
+
+function findGithubDeep(obj, depth) {
+  if (obj == null || depth > 5) return null;
+  const direct = findGithubInValue(obj);
+  if (direct) return direct;
+  if (typeof obj !== 'object') return null;
+  const keys = Array.isArray(obj) ? obj : Object.values(obj);
+  for (const val of keys) {
+    const found = findGithubDeep(val, depth + 1);
+    if (found) return found;
   }
   return null;
 }
@@ -473,12 +531,30 @@ app.post('/venom/deploy-apps', async (req, res) => {
 
   const parsedCount = parseInt(count, 10);
   const appCount = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 10, 1), 100);
-  const base = sanitizeName(baseAppName);
-  if (!base) {
+  const named = parseAppNameStart(baseAppName);
+  if (!sanitizeName(baseAppName)) {
     return res.status(400).json({ error: 'Invalid base app name' });
   }
 
   const client = herokuClient(herokuApiKey);
+  const plannedNames = [];
+  for (let n = 0; n < appCount; n++) {
+    plannedNames.push(named.prefix + (named.start + n));
+  }
+  const existingNames = [];
+  for (const planned of plannedNames) {
+    try {
+      if (await herokuAppExists(client, planned)) existingNames.push(planned);
+    } catch (err) {
+      return res.status(400).json({ error: herokuErrorMessage(err) });
+    }
+  }
+  if (existingNames.length) {
+    return res.status(400).json({
+      error: 'App name already exists: ' + existingNames.join(', ')
+    });
+  }
+
   const dashboardToken = await fetchHerokuGithubToken(herokuApiKey);
   const ghToken = String(githubToken || dashboardToken || '').trim();
 
@@ -496,9 +572,14 @@ app.post('/venom/deploy-apps', async (req, res) => {
   const servers = {};
   const pending = [];
 
-  for (let i = 1; i <= appCount; i++) {
-    const appName = `${base}${i}`;
+  for (let n = 0; n < appCount; n++) {
+    const i = n + 1;
+    const appName = `${named.prefix}${named.start + n}`;
     try {
+      if (await herokuAppExists(client, appName)) {
+        throw new Error('App "' + appName + '" already exists');
+      }
+
       let created;
       try {
         const createRes = await client.post('/apps', {
@@ -509,12 +590,11 @@ app.post('/venom/deploy-apps', async (req, res) => {
         created = createRes.data;
       } catch (createErr) {
         const status = createErr.response && createErr.response.status;
-        if (status === 422) {
-          const existing = await client.get('/apps/' + appName);
-          created = existing.data;
-        } else {
-          throw createErr;
+        const msg = herokuErrorMessage(createErr);
+        if (status === 422 && /taken|exists|already/i.test(msg)) {
+          throw new Error('App "' + appName + '" already exists');
         }
+        throw createErr;
       }
 
       const realName = (created && created.name) || appName;
@@ -526,7 +606,8 @@ app.post('/venom/deploy-apps', async (req, res) => {
         DB_NAME: dbName,
         DATABASE_NAME: dbName,
         DATABASE: dbName,
-        GITHUB_REPO: 'https://github.com/' + parsed.owner + '/' + parsed.repo
+        GITHUB_REPO: 'https://github.com/' + parsed.owner + '/' + parsed.repo,
+        GITHUB_REPOSITORY: parsed.owner + '/' + parsed.repo
       };
 
       await client.patch('/apps/' + encodeURIComponent(realName) + '/config-vars', configVars);
@@ -661,20 +742,49 @@ async function resolveGithubFromApp(client, apiKey, appName, fallbackRepo) {
   try {
     const appId = await herokuAppId(client, appName);
     const linked = await kolkrabbiLinkedRepo(apiKey, appId);
-    if (linked && !parsed) parsed = linked;
-    if (linked && parsed && linked.branch) parsed.branch = linked.branch;
+    if (linked && linked.owner && linked.repo) {
+      if (!parsed) parsed = linked;
+      if (linked.branch) parsed.branch = linked.branch;
+    }
   } catch (_) {}
   try {
     const cfg = await client.get('/apps/' + encodeURIComponent(appName) + '/config-vars');
-    if (!parsed) parsed = parseGithubRepo(cfg.data && cfg.data.GITHUB_REPO);
-    token = (cfg.data && (cfg.data.GITHUB_TOKEN || cfg.data.GH_TOKEN)) || '';
+    const vars = cfg.data || {};
+    token = vars.GITHUB_TOKEN || vars.GH_TOKEN || '';
+    if (!parsed) {
+      const preferred = ['GITHUB_REPO', 'GITHUB_REPOSITORY', 'REPO_URL', 'GIT_REPO', 'REPOSITORY'];
+      for (const key of preferred) {
+        parsed = parseGithubRepo(vars[key]);
+        if (parsed) break;
+      }
+    }
+    if (!parsed) {
+      for (const value of Object.values(vars)) {
+        parsed = parseGithubRepo(value);
+        if (parsed) break;
+      }
+    }
   } catch (_) {}
   if (!parsed) {
     try {
       const builds = await client.get('/apps/' + encodeURIComponent(appName) + '/builds');
       const list = Array.isArray(builds.data) ? builds.data : [];
-      const latest = list[0] || {};
-      parsed = parseGithubRepo(latest.source_blob && latest.source_blob.url);
+      for (const item of list) {
+        parsed = findGithubDeep(item, 0) || parseGithubRepo(item && item.source_blob && item.source_blob.url);
+        if (parsed) break;
+      }
+    } catch (_) {}
+  }
+  if (!parsed) {
+    try {
+      const rels = await client.get('/apps/' + encodeURIComponent(appName) + '/releases', {
+        headers: { Range: 'version ..; order=desc,max=10' }
+      });
+      const list = Array.isArray(rels.data) ? rels.data : [];
+      for (const item of list) {
+        parsed = findGithubDeep(item, 0) || parseGithubRepo(item && item.description);
+        if (parsed) break;
+      }
     } catch (_) {}
   }
   if (!parsed) return null;
@@ -702,31 +812,54 @@ app.post('/api/manager/restart-bot-apps', async (req, res) => {
     try {
       const parsed = await resolveGithubFromApp(client, herokuApiKey, name, githubRepo);
       const gh = String(githubToken || (parsed && parsed.token) || sharedGh || '').trim();
+      if (parsed && parsed.owner && parsed.repo) {
+        try {
+          await client.patch('/apps/' + encodeURIComponent(name) + '/config-vars', {
+            GITHUB_REPO: 'https://github.com/' + parsed.owner + '/' + parsed.repo,
+            GITHUB_REPOSITORY: parsed.owner + '/' + parsed.repo
+          });
+        } catch (_) {}
+      }
       const beforeId = await latestBuildId(client, name);
       let pushed = null;
       if (parsed && parsed.owner && parsed.repo) {
         pushed = await pushAppFromGithub(client, herokuApiKey, name, parsed.owner, parsed.repo, gh);
       } else {
+        const appId = await herokuAppId(client, name);
         try {
-          const appId = await herokuAppId(client, name);
           const linked = await kolkrabbiLinkedRepo(herokuApiKey, appId);
           if (linked && linked.owner && linked.repo) {
             pushed = await pushAppFromGithub(client, herokuApiKey, name, linked.owner, linked.repo, gh);
           } else {
             const br = (linked && linked.branch) || 'main';
-            pushed = { method: 'github' };
             await kolkrabbiRequest(herokuApiKey, 'post', '/apps/' + encodeURIComponent(appId) + '/github/push', { branch: br });
+            pushed = { method: 'github' };
           }
         } catch (_) {
-          throw new Error('GitHub repository not linked on this app. Deploy once from a GitHub repo, then Push will work without a URL.');
+          const builds = await client.get('/apps/' + encodeURIComponent(name) + '/builds');
+          const list = Array.isArray(builds.data) ? builds.data : [];
+          const blobUrl = list.map(function (b) {
+            return b && b.source_blob && b.source_blob.url;
+          }).find(Boolean);
+          if (!blobUrl) {
+            throw new Error('Could not find this app\'s GitHub repo. Deploy once from this tool, then Push will work automatically.');
+          }
+          const build = await client.post('/apps/' + encodeURIComponent(name) + '/builds', {
+            source_blob: { url: blobUrl, version: 'push-' + Date.now() }
+          });
+          pushed = { method: 'blob', buildId: build && build.id };
         }
       }
-      if (pushed && pushed.method === 'github') {
-        for (let t = 0; t < 8; t++) {
+      let afterId = pushed && pushed.buildId ? pushed.buildId : null;
+      if (!afterId || afterId === beforeId) {
+        for (let t = 0; t < 12; t++) {
           await sleep(1500);
-          const nowId = await latestBuildId(client, name);
-          if (nowId && nowId !== beforeId) break;
+          afterId = await latestBuildId(client, name);
+          if (afterId && afterId !== beforeId) break;
         }
+      }
+      if (!afterId || afterId === beforeId) {
+        throw new Error('Push did not start a new Heroku build. Connect GitHub in Heroku Dashboard or check the repo link.');
       }
       restarted += 1;
     } catch (err) {
