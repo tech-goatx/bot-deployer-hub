@@ -32,8 +32,7 @@ function herokuHeaders(apiKey) {
     Authorization: `Basic ${basic}`,
     Accept: 'application/vnd.heroku+json; version=3',
     'Content-Type': 'application/json',
-    'User-Agent': 'Aman-TechX',
-    Range: 'id ..; max=1000'
+    'User-Agent': 'Aman-TechX'
   };
 }
 
@@ -58,8 +57,17 @@ function herokuClient(apiKey) {
 function sanitizeName(name) {
   return String(name || '')
     .toLowerCase()
-    .replace(/[^a-z0-9-]/g, '')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
     .slice(0, 28);
+}
+
+function herokuWebUrl(app) {
+  const url = app && app.web_url ? String(app.web_url).replace(/\/$/, '') : '';
+  if (url) return url;
+  const n = app && app.name ? String(app.name) : '';
+  return n ? 'https://' + n + '.herokuapp.com' : '';
 }
 
 function parseGithubRepo(input) {
@@ -73,22 +81,78 @@ function parseGithubRepo(input) {
   return { owner, repo };
 }
 
-async function resolveTarballUrl(owner, repo) {
-  const branches = ['main', 'master'];
+function githubHeaders(token) {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'Aman-TechX',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+  const t = String(token || '').trim();
+  if (t) headers.Authorization = 'Bearer ' + t;
+  return headers;
+}
+
+function githubRedirectUrl(errOrRes) {
+  const res = errOrRes && errOrRes.response ? errOrRes.response : errOrRes;
+  const headers = res && res.headers ? res.headers : {};
+  return headers.location || headers.Location || '';
+}
+
+async function resolveTarballUrl(owner, repo, githubToken) {
+  const token = String(githubToken || '').trim();
+  const apiBase = 'https://api.github.com/repos/' + owner + '/' + repo;
+  let defaultBranch = 'main';
+
+  try {
+    const info = await axios.get(apiBase, {
+      headers: githubHeaders(token),
+      timeout: 20000,
+      validateStatus: function (s) { return s < 500; }
+    });
+    if (info.status === 401 || info.status === 403) {
+      throw new Error('GitHub token invalid or missing repo permission.');
+    }
+    if (info.status === 404) {
+      throw new Error(token
+        ? 'GitHub repo not found, or this token cannot access the private repo.'
+        : 'GitHub repo not found. Private repos need a GitHub token (ghp_...).');
+    }
+    if (info.status >= 400) {
+      throw new Error('Could not access GitHub repository');
+    }
+    if (info.data && info.data.default_branch) defaultBranch = info.data.default_branch;
+  } catch (err) {
+    if (err.message && /GitHub/.test(err.message)) throw err;
+    throw new Error('Could not access GitHub repository');
+  }
+
+  const branches = [defaultBranch, 'main', 'master'].filter(function (b, i, arr) {
+    return arr.indexOf(b) === i;
+  });
+
   for (const branch of branches) {
-    const url = `https://github.com/${owner}/${repo}/tarball/${branch}`;
+    const tarballApi = apiBase + '/tarball/' + branch;
     try {
-      const res = await axios.head(url, {
-        timeout: 15000,
-        maxRedirects: 5,
-        validateStatus: (s) => s < 400
+      const res = await axios.get(tarballApi, {
+        headers: githubHeaders(token),
+        timeout: 20000,
+        maxRedirects: 0,
+        validateStatus: function (s) { return s === 200 || s === 301 || s === 302; }
       });
-      if (res.status < 400) return url;
-    } catch (_) {
-      /* try next branch */
+      const loc = githubRedirectUrl(res);
+      if (loc) return loc;
+    } catch (err) {
+      const loc = githubRedirectUrl(err);
+      const status = err.response && err.response.status;
+      if (loc && (status === 301 || status === 302)) return loc;
     }
   }
-  return `https://github.com/${owner}/${repo}/tarball/main`;
+
+  if (token) {
+    return 'https://x-access-token:' + encodeURIComponent(token) +
+      '@api.github.com/repos/' + owner + '/' + repo + '/tarball/' + defaultBranch;
+  }
+  return 'https://github.com/' + owner + '/' + repo + '/tarball/' + defaultBranch;
 }
 
 function normalizeMongodbUrl(url) {
@@ -97,6 +161,59 @@ function normalizeMongodbUrl(url) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForBuilds(client, pending, timeoutMs) {
+  const startedAt = Date.now();
+  while (pending.some((item) => !item.buildStatus)) {
+    if (Date.now() - startedAt > timeoutMs) break;
+    const open = pending.filter((item) => !item.buildStatus);
+    await Promise.all(open.map(async (item) => {
+      if (!item.buildId) {
+        item.buildStatus = 'error';
+        item.buildError = 'Build did not start';
+        return;
+      }
+      try {
+        const res = await client.get(
+          '/apps/' + encodeURIComponent(item.appName) + '/builds/' + encodeURIComponent(item.buildId)
+        );
+        const status = res.data && res.data.status;
+        if (status === 'succeeded' || status === 'failed') {
+          item.buildStatus = status;
+        }
+      } catch (err) {
+        const status = err.response && err.response.status;
+        if (status === 404) {
+          item.buildStatus = 'error';
+          item.buildError = 'Build not found';
+        }
+      }
+    }));
+    if (pending.some((item) => !item.buildStatus)) await sleep(5000);
+  }
+  pending.forEach((item) => {
+    if (!item.buildStatus) {
+      item.buildStatus = 'timeout';
+      item.buildError = 'Build timed out. Open Heroku dashboard and check build logs.';
+    }
+  });
+}
+
+async function scaleWebDyno(client, appName) {
+  const sizes = ['eco', 'basic', 'standard-1x'];
+  let lastErr = null;
+  for (const size of sizes) {
+    try {
+      await client.patch('/apps/' + encodeURIComponent(appName) + '/formation', {
+        updates: [{ type: 'web', quantity: 1, size: size }]
+      });
+      return size;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Could not start web dyno');
 }
 
 app.get('/', (req, res) => {
@@ -111,6 +228,7 @@ app.post('/venom/deploy-apps', async (req, res) => {
   const {
     githubRepo,
     herokuApiKey,
+    githubToken,
     baseAppName,
     mongodbUrl,
     dbName,
@@ -136,15 +254,16 @@ app.post('/venom/deploy-apps', async (req, res) => {
   const client = herokuClient(herokuApiKey);
   let tarballUrl;
   try {
-    tarballUrl = await resolveTarballUrl(parsed.owner, parsed.repo);
+    tarballUrl = await resolveTarballUrl(parsed.owner, parsed.repo, githubToken);
   } catch (err) {
-    return res.status(400).json({ error: 'Could not access GitHub repository' });
+    return res.status(400).json({ error: err.message || 'Could not access GitHub repository' });
   }
 
   const mongo = normalizeMongodbUrl(mongodbUrl);
   const results = [];
   const failedApps = [];
   const servers = {};
+  const pending = [];
 
   for (let i = 1; i <= appCount; i++) {
     const appName = `${base}${i}`;
@@ -167,6 +286,7 @@ app.post('/venom/deploy-apps', async (req, res) => {
         }
       }
 
+      const realName = (created && created.name) || appName;
       const configVars = {
         MONGODB_URI: mongo,
         MONGODB_URL: mongo,
@@ -177,44 +297,73 @@ app.post('/venom/deploy-apps', async (req, res) => {
         DATABASE: dbName,
         GITHUB_REPO: `https://github.com/${parsed.owner}/${parsed.repo}`
       };
-
-      await client.patch(`/apps/${appName}/config-vars`, configVars);
-
-      try {
-        await client.post(`/apps/${appName}/formation`, {
-          updates: [{ type: 'web', quantity: 1, size: 'eco' }]
-        });
-      } catch (_) {
-        /* formation may not exist until first build */
+      if (githubToken) {
+        configVars.GITHUB_TOKEN = String(githubToken).trim();
       }
 
-      await client.post(`/apps/${appName}/builds`, {
+      await client.patch(`/apps/${encodeURIComponent(realName)}/config-vars`, configVars);
+
+      const buildRes = await client.post(`/apps/${encodeURIComponent(realName)}/builds`, {
         source_blob: {
           url: tarballUrl,
           version: `deploy-${Date.now()}-${i}`
         }
       });
 
-      const appUrl = created.web_url
-        ? created.web_url.replace(/\/$/, '')
-        : `https://${appName}.herokuapp.com`;
-
-      results.push({
-        appName,
-        status: 'success',
-        appUrl
+      pending.push({
+        index: i,
+        appName: realName,
+        created: created,
+        buildId: buildRes.data && buildRes.data.id
       });
-      servers[`server${i}`] = appUrl;
     } catch (err) {
-      const message = herokuErrorMessage(err);
       failedApps.push({
         appName,
         status: 'failed',
-        error: message
+        error: herokuErrorMessage(err)
       });
     }
 
     if (i < appCount) await sleep(400);
+  }
+
+  await waitForBuilds(client, pending, 300000);
+
+  for (const item of pending) {
+    if (item.buildStatus !== 'succeeded') {
+      let message = item.buildError || 'Build failed';
+      if (item.buildStatus === 'failed') {
+        message = 'Build failed. Private GitHub repos need a valid GitHub token, or check Heroku build logs.';
+      }
+      failedApps.push({
+        appName: item.appName,
+        status: 'failed',
+        error: message
+      });
+      continue;
+    }
+
+    try {
+      await scaleWebDyno(client, item.appName);
+      let fresh = item.created;
+      try {
+        const latest = await client.get('/apps/' + encodeURIComponent(item.appName));
+        if (latest && latest.data) fresh = latest.data;
+      } catch (_) {}
+      const appUrl = herokuWebUrl(fresh);
+      results.push({
+        appName: item.appName,
+        status: 'success',
+        appUrl
+      });
+      servers[`server${item.index}`] = appUrl;
+    } catch (err) {
+      failedApps.push({
+        appName: item.appName,
+        status: 'failed',
+        error: herokuErrorMessage(err) || 'Build ok but web dyno did not start'
+      });
+    }
   }
 
   return res.json({
@@ -233,11 +382,13 @@ app.post('/api/manager/bot-apps', async (req, res) => {
 
   try {
     const client = herokuClient(herokuApiKey);
-    const response = await client.get('/apps');
+    const response = await client.get('/apps', {
+      headers: { Range: 'id ..; max=1000' }
+    });
     const apps = (response.data || [])
       .map((item) => ({
         name: item.name,
-        web_url: item.web_url,
+        web_url: herokuWebUrl(item),
         created_at: item.created_at,
         updated_at: item.updated_at,
         region: item.region?.name || item.region,
@@ -262,27 +413,28 @@ app.post('/api/manager/bot-apps', async (req, res) => {
 });
 
 async function resolveGithubFromApp(client, appName, fallbackRepo) {
-  if (fallbackRepo) {
-    const parsed = parseGithubRepo(fallbackRepo);
-    if (parsed) return parsed;
-  }
+  let token = '';
+  let parsed = fallbackRepo ? parseGithubRepo(fallbackRepo) : null;
   try {
     const cfg = await client.get(`/apps/${encodeURIComponent(appName)}/config-vars`);
-    const parsed = parseGithubRepo(cfg.data && cfg.data.GITHUB_REPO);
-    if (parsed) return parsed;
+    if (!parsed) parsed = parseGithubRepo(cfg.data && cfg.data.GITHUB_REPO);
+    token = (cfg.data && (cfg.data.GITHUB_TOKEN || cfg.data.GH_TOKEN)) || '';
   } catch (_) {}
-  try {
-    const builds = await client.get(`/apps/${encodeURIComponent(appName)}/builds`);
-    const list = Array.isArray(builds.data) ? builds.data : [];
-    const latest = list[0] || {};
-    const parsed = parseGithubRepo(latest.source_blob && latest.source_blob.url);
-    if (parsed) return parsed;
-  } catch (_) {}
-  return null;
+  if (!parsed) {
+    try {
+      const builds = await client.get(`/apps/${encodeURIComponent(appName)}/builds`);
+      const list = Array.isArray(builds.data) ? builds.data : [];
+      const latest = list[0] || {};
+      parsed = parseGithubRepo(latest.source_blob && latest.source_blob.url);
+    } catch (_) {}
+  }
+  if (!parsed) return null;
+  parsed.token = token;
+  return parsed;
 }
 
 app.post('/api/manager/restart-bot-apps', async (req, res) => {
-  const { herokuApiKey, appNames, githubRepo } = req.body || {};
+  const { herokuApiKey, appNames, githubRepo, githubToken } = req.body || {};
   if (!herokuApiKey) {
     return res.status(400).json({ success: false, error: 'Heroku API key required' });
   }
@@ -298,7 +450,11 @@ app.post('/api/manager/restart-bot-apps', async (req, res) => {
     try {
       const parsed = await resolveGithubFromApp(client, name, githubRepo);
       if (parsed) {
-        const tarballUrl = await resolveTarballUrl(parsed.owner, parsed.repo);
+        const tarballUrl = await resolveTarballUrl(
+          parsed.owner,
+          parsed.repo,
+          githubToken || parsed.token
+        );
         await client.post(`/apps/${encodeURIComponent(name)}/builds`, {
           source_blob: {
             url: tarballUrl,
