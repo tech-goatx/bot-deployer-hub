@@ -578,7 +578,16 @@ if (venomForm) {
       return;
     }
 
-    if (!confirm('Deploy ' + appCount + ' apps with names: ' + baseAppName + '1 to ' + baseAppName + appCount + '?')) {
+    function parseNameStart(raw) {
+      const cleaned = String(raw || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      const match = cleaned.match(/^(.*?)(\d+)$/);
+      if (match) return { prefix: match[1], start: parseInt(match[2], 10) };
+      return { prefix: cleaned, start: 1 };
+    }
+    const named = parseNameStart(baseAppName);
+    const firstName = named.prefix + named.start;
+    const lastName = named.prefix + (named.start + appCount - 1);
+    if (!confirm('Deploy ' + appCount + ' apps with names: ' + firstName + ' to ' + lastName + '? Existing names will fail.')) {
       return;
     }
 

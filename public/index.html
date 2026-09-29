@@ -8,7 +8,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
-  <link rel="stylesheet" href="/styles.css?v=9">
+  <link rel="stylesheet" href="/styles.css?v=10">
 </head>
 <body>
   <div class="bg-gradient"></div>
@@ -95,7 +95,7 @@
               <input type="text" id="appCount" class="input" inputmode="numeric" maxlength="3" placeholder="Select no. between 1-100" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
               <i class="fas fa-hashtag input-icon"></i>
             </div>
-            <p class="field-hint">Apps will be named basename1, basename2, … up to the number you choose.</p>
+            <p class="field-hint">Name ke last number se start hoga. Example: aman-md2 + 10 apps = aman-md2 to aman-md11. Pehle se maujood name par error aayega.</p>
           </div>
 
           <button type="submit" class="btn-deploy" id="deployBtn">
@@ -183,7 +183,7 @@
         <button class="close-modal" onclick="closeRestartModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="modal-message">Latest GitHub code push karke restart karo <span id="restartCount" style="color:#c8c8c8;font-weight:600;">0</span> app(s)</p>
+         <p class="modal-message">App pe already linked GitHub se latest code push hoga. Repo URL nahi chahiye. <span id="restartCount" style="color:#c8c8c8;font-weight:600;">0</span> app(s)</p>
         <button class="modal-btn" onclick="confirmRestart()"><i class="fas fa-sync-alt"></i> Confirm Push</button>
         <button class="modal-btn modal-btn-secondary" onclick="closeRestartModal()"><i class="fas fa-times"></i> Cancel</button>
       </div>
@@ -248,6 +248,6 @@
     <span id="toastMessage">Operation completed</span>
   </div>
 
-  <script src="/app.js?v=11"></script>
+  <script src="/app.js?v=13"></script>
 </body>
 </html>
