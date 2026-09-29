@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -72,13 +73,15 @@ function herokuWebUrl(app) {
 
 function parseGithubRepo(input) {
   const raw = String(input || '').trim();
-  const match = raw.match(
-    /github\.com[/:]([^/]+)\/([^/#?]+)/i
-  );
-  if (!match) return null;
-  const owner = match[1];
-  const repo = match[2].replace(/\.git$/i, '');
-  return { owner, repo };
+  const match = raw.match(/github\.com[/:]([^/]+)\/([^/#?]+)/i);
+  if (match) {
+    return { owner: match[1], repo: match[2].replace(/\.git$/i, '') };
+  }
+  const short = raw.match(/^([^/\s]+)\/([^/#?\s]+)$/);
+  if (short) {
+    return { owner: short[1], repo: short[2].replace(/\.git$/i, '') };
+  }
+  return null;
 }
 
 function githubHeaders(token) {
@@ -92,67 +95,277 @@ function githubHeaders(token) {
   return headers;
 }
 
-function githubRedirectUrl(errOrRes) {
-  const res = errOrRes && errOrRes.response ? errOrRes.response : errOrRes;
-  const headers = res && res.headers ? res.headers : {};
-  return headers.location || headers.Location || '';
+function privateRepoHint() {
+  return 'Connect GitHub in Heroku Dashboard (Account > Applications > GitHub) to deploy private repos. No GitHub token needed.';
 }
 
-async function resolveTarballUrl(owner, repo, githubToken) {
-  const token = String(githubToken || '').trim();
-  const apiBase = 'https://api.github.com/repos/' + owner + '/' + repo;
-  let defaultBranch = 'main';
+function kolkrabbiHeaderSets(apiKey) {
+  const token = normalizeHerokuToken(apiKey);
+  const accept = 'application/vnd.heroku+json; version=3';
+  return [
+    {
+      Authorization: 'Bearer ' + token,
+      Accept: accept,
+      'Content-Type': 'application/json',
+      'User-Agent': 'Aman-TechX'
+    },
+    herokuHeaders(apiKey)
+  ];
+}
 
+const KOLKRABBI_BASES = [
+  'https://kolkrabbi.heroku.com',
+  'https://kolkrabbi.herokuapp.com'
+];
+
+async function kolkrabbiRequest(apiKey, method, relPath, body) {
+  let lastErr = null;
+  for (const base of KOLKRABBI_BASES) {
+    for (const headers of kolkrabbiHeaderSets(apiKey)) {
+      try {
+        const res = await axios({
+          method: method,
+          url: base + relPath,
+          headers: headers,
+          data: body || undefined,
+          timeout: 30000,
+          validateStatus: function (s) { return s < 500; },
+          maxRedirects: 5
+        });
+        if (res.status >= 400) {
+          lastErr = new Error(herokuErrorMessage({ response: res }) || ('kolkrabbi ' + res.status));
+          continue;
+        }
+        return res.data == null ? {} : res.data;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+  }
+  if (lastErr) throw lastErr;
+  return null;
+}
+
+function extractGithubToken(data) {
+  if (!data) return '';
+  if (typeof data === 'string' && data.trim()) return data.trim();
+  const nested = data.github || data.account || data.user || {};
+  return String(
+    data.token ||
+    data.access_token ||
+    data.github_token ||
+    nested.token ||
+    nested.access_token ||
+    ''
+  ).trim();
+}
+
+async function fetchHerokuGithubToken(herokuApiKey) {
+  const paths = [
+    '/account/github/token',
+    '/account/get-github-token',
+    '/account/github',
+    '/account/info',
+    '/github/token',
+    '/github/auth-token'
+  ];
+  for (const p of paths) {
+    try {
+      const data = await kolkrabbiRequest(herokuApiKey, 'get', p);
+      const t = extractGithubToken(data);
+      if (t) return t;
+    } catch (_) {}
+  }
+  return '';
+}
+
+async function herokuAppId(client, appName) {
+  const res = await client.get('/apps/' + encodeURIComponent(appName));
+  return (res.data && (res.data.id || res.data.name)) || appName;
+}
+
+async function kolkrabbiLinkedRepo(apiKey, appId) {
   try {
-    const info = await axios.get(apiBase, {
-      headers: githubHeaders(token),
+    const data = await kolkrabbiRequest(apiKey, 'get', '/apps/' + encodeURIComponent(appId) + '/github');
+    if (!data) return null;
+    const repo = data.repo_name || data.repo || data.repository || (data.github && data.github.repo);
+    const parsed = parseGithubRepo(repo);
+    const branch = data.branch || data.default_branch || (data.github && data.github.branch) || 'main';
+    if (parsed) parsed.branch = branch;
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+function githubRepoFull(data) {
+  if (!data) return '';
+  return String(
+    data.repo_name ||
+    data.repo ||
+    data.repository ||
+    (data.github && (data.github.repo_name || data.github.repo)) ||
+    ''
+  ).replace(/\.git$/i, '');
+}
+
+async function kolkrabbiDeploy(apiKey, appId, owner, repo, branch) {
+  const full = owner + '/' + repo;
+  const rel = '/apps/' + encodeURIComponent(appId) + '/github';
+  let linked = null;
+  try {
+    linked = await kolkrabbiRequest(apiKey, 'get', rel);
+  } catch (_) {}
+
+  const linkedFull = githubRepoFull(linked).replace(/^https?:\/\/github\.com\//i, '');
+  const already = linkedFull.toLowerCase() === full.toLowerCase();
+  const br = branch || (linked && (linked.branch || linked.default_branch)) || 'main';
+
+  if (!already) {
+    const bodies = [
+      { repo: full, branch: br, auto_deploy: false },
+      { repo_name: full, branch: br },
+      { repo: full },
+      { repo_name: full },
+      { repository: full, branch: br }
+    ];
+    let ok = false;
+    let lastErr = null;
+    for (const method of ['patch', 'put', 'post']) {
+      for (const body of bodies) {
+        try {
+          await kolkrabbiRequest(apiKey, method, rel, body);
+          ok = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (ok) break;
+    }
+    if (!ok && lastErr) throw lastErr;
+  }
+
+  const pushBodies = [{ branch: br }, { ref: br }, { branch: 'master' }, {}];
+  let lastPushErr = null;
+  for (const body of pushBodies) {
+    try {
+      return await kolkrabbiRequest(apiKey, 'post', rel + '/push', body);
+    } catch (err) {
+      lastPushErr = err;
+    }
+  }
+  throw lastPushErr || new Error(privateRepoHint());
+}
+
+async function resolveDefaultBranch(owner, repo, githubToken) {
+  const branches = ['main', 'master'];
+  try {
+    const info = await axios.get('https://api.github.com/repos/' + owner + '/' + repo, {
+      headers: githubHeaders(githubToken),
       timeout: 20000,
       validateStatus: function (s) { return s < 500; }
     });
-    if (info.status === 401 || info.status === 403) {
-      throw new Error('GitHub token invalid or missing repo permission.');
+    if (info.status === 200 && info.data && info.data.default_branch) {
+      return [info.data.default_branch].concat(branches.filter(function (b) {
+        return b !== info.data.default_branch;
+      }));
     }
-    if (info.status === 404) {
-      throw new Error(token
-        ? 'GitHub repo not found, or this token cannot access the private repo.'
-        : 'GitHub repo not found. Private repos need a GitHub token (ghp_...).');
-    }
-    if (info.status >= 400) {
-      throw new Error('Could not access GitHub repository');
-    }
-    if (info.data && info.data.default_branch) defaultBranch = info.data.default_branch;
-  } catch (err) {
-    if (err.message && /GitHub/.test(err.message)) throw err;
-    throw new Error('Could not access GitHub repository');
-  }
+  } catch (_) {}
+  return branches;
+}
 
-  const branches = [defaultBranch, 'main', 'master'].filter(function (b, i, arr) {
-    return arr.indexOf(b) === i;
-  });
+async function downloadGithubTarball(owner, repo, githubToken) {
+  const token = String(githubToken || '').trim();
+  const branches = await resolveDefaultBranch(owner, repo, token);
+  let lastStatus = 0;
+  const auth = encodeURIComponent(token);
 
   for (const branch of branches) {
-    const tarballApi = apiBase + '/tarball/' + branch;
-    try {
-      const res = await axios.get(tarballApi, {
-        headers: githubHeaders(token),
-        timeout: 20000,
-        maxRedirects: 0,
-        validateStatus: function (s) { return s === 200 || s === 301 || s === 302; }
-      });
-      const loc = githubRedirectUrl(res);
-      if (loc) return loc;
-    } catch (err) {
-      const loc = githubRedirectUrl(err);
-      const status = err.response && err.response.status;
-      if (loc && (status === 301 || status === 302)) return loc;
+    const enc = encodeURIComponent(branch);
+    const urls = [];
+    if (token) {
+      urls.push('https://x-access-token:' + auth + '@codeload.github.com/' + owner + '/' + repo + '/tar.gz/refs/heads/' + enc);
+      urls.push('https://x-access-token:' + auth + '@github.com/' + owner + '/' + repo + '/archive/refs/heads/' + enc + '.tar.gz');
+      urls.push('https://api.github.com/repos/' + owner + '/' + repo + '/tarball/' + enc);
+    }
+    urls.push('https://codeload.github.com/' + owner + '/' + repo + '/tar.gz/refs/heads/' + enc);
+    urls.push('https://github.com/' + owner + '/' + repo + '/archive/refs/heads/' + enc + '.tar.gz');
+    urls.push('https://api.github.com/repos/' + owner + '/' + repo + '/tarball/' + enc);
+
+    for (const url of urls) {
+      try {
+        const headers = githubHeaders(token);
+        if (url.indexOf('x-access-token:') !== -1) {
+          delete headers.Authorization;
+        }
+        const res = await axios.get(url, {
+          headers: headers,
+          responseType: 'arraybuffer',
+          timeout: 120000,
+          maxRedirects: 5,
+          maxContentLength: Infinity,
+          validateStatus: function (s) { return s < 400; },
+          beforeRedirect: function (options) {
+            const host = options.hostname || options.host || '';
+            if (host && host !== 'api.github.com' && options.headers) {
+              delete options.headers.Authorization;
+              delete options.headers.authorization;
+            }
+          }
+        });
+        if (res.data && res.data.byteLength > 200) {
+          return Buffer.from(res.data);
+        }
+      } catch (err) {
+        lastStatus = (err.response && err.response.status) || lastStatus;
+      }
     }
   }
 
-  if (token) {
-    return 'https://x-access-token:' + encodeURIComponent(token) +
-      '@api.github.com/repos/' + owner + '/' + repo + '/tarball/' + defaultBranch;
+  if (lastStatus === 404 || lastStatus === 401 || lastStatus === 403) {
+    throw new Error(privateRepoHint());
   }
-  return 'https://github.com/' + owner + '/' + repo + '/tarball/' + defaultBranch;
+  throw new Error('Could not download GitHub repository. ' + privateRepoHint());
+}
+
+async function uploadSourceAndBuild(client, appName, tarballBuf, version) {
+  const src = await client.post('/apps/' + encodeURIComponent(appName) + '/sources');
+  const blob = src.data && src.data.source_blob;
+  if (!blob || !blob.put_url || !blob.get_url) {
+    throw new Error('Could not create Heroku source blob');
+  }
+  await axios.put(blob.put_url, tarballBuf, {
+    headers: {
+      'Content-Type': '',
+      'Content-Length': tarballBuf.length
+    },
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+    timeout: 180000,
+    transformRequest: [function (data) { return data; }]
+  });
+  const buildRes = await client.post('/apps/' + encodeURIComponent(appName) + '/builds', {
+    source_blob: {
+      url: blob.get_url,
+      version: version || ('deploy-' + Date.now())
+    }
+  });
+  return buildRes.data;
+}
+
+async function pushAppFromGithub(client, apiKey, appName, owner, repo, githubToken) {
+  const appId = await herokuAppId(client, appName);
+  try {
+    const linked = await kolkrabbiLinkedRepo(apiKey, appId);
+    const branch = (linked && linked.branch) || 'main';
+    await kolkrabbiDeploy(apiKey, appId, owner, repo, branch);
+    return { method: 'github' };
+  } catch (_) {}
+
+  const buf = await downloadGithubTarball(owner, repo, githubToken);
+  const build = await uploadSourceAndBuild(client, appName, buf, 'push-' + Date.now());
+  return { method: 'blob', buildId: build && build.id };
 }
 
 function normalizeMongodbUrl(url) {
@@ -163,6 +376,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function latestBuildId(client, appName) {
+  try {
+    const res = await client.get('/apps/' + encodeURIComponent(appName) + '/builds');
+    const list = Array.isArray(res.data) ? res.data : [];
+    if (list.length && list[0] && list[0].id) return list[0].id;
+  } catch (_) {}
+  return null;
+}
+
 async function waitForBuilds(client, pending, timeoutMs) {
   const startedAt = Date.now();
   while (pending.some((item) => !item.buildStatus)) {
@@ -170,9 +392,8 @@ async function waitForBuilds(client, pending, timeoutMs) {
     const open = pending.filter((item) => !item.buildStatus);
     await Promise.all(open.map(async (item) => {
       if (!item.buildId) {
-        item.buildStatus = 'error';
-        item.buildError = 'Build did not start';
-        return;
+        item.buildId = await latestBuildId(client, item.appName);
+        if (!item.buildId) return;
       }
       try {
         const res = await client.get(
@@ -216,6 +437,12 @@ async function scaleWebDyno(client, appName) {
   throw lastErr || new Error('Could not start web dyno');
 }
 
+app.get('/download.zip', (req, res) => {
+  const zip = path.join(__dirname, 'aman-techx-heroku-deployer.zip');
+  if (fs.existsSync(zip)) return res.download(zip, 'aman-techx-heroku-deployer.zip');
+  return res.status(404).send('Zip not ready');
+});
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -252,11 +479,15 @@ app.post('/venom/deploy-apps', async (req, res) => {
   }
 
   const client = herokuClient(herokuApiKey);
-  let tarballUrl;
+  const dashboardToken = await fetchHerokuGithubToken(herokuApiKey);
+  const ghToken = String(githubToken || dashboardToken || '').trim();
+
+  let tarballBuf = null;
+  let tarballErr = null;
   try {
-    tarballUrl = await resolveTarballUrl(parsed.owner, parsed.repo, githubToken);
+    tarballBuf = await downloadGithubTarball(parsed.owner, parsed.repo, ghToken);
   } catch (err) {
-    return res.status(400).json({ error: err.message || 'Could not access GitHub repository' });
+    tarballErr = err;
   }
 
   const mongo = normalizeMongodbUrl(mongodbUrl);
@@ -277,9 +508,9 @@ app.post('/venom/deploy-apps', async (req, res) => {
         });
         created = createRes.data;
       } catch (createErr) {
-        const status = createErr.response?.status;
+        const status = createErr.response && createErr.response.status;
         if (status === 422) {
-          const existing = await client.get(`/apps/${appName}`);
+          const existing = await client.get('/apps/' + appName);
           created = existing.data;
         } else {
           throw createErr;
@@ -295,26 +526,38 @@ app.post('/venom/deploy-apps', async (req, res) => {
         DB_NAME: dbName,
         DATABASE_NAME: dbName,
         DATABASE: dbName,
-        GITHUB_REPO: `https://github.com/${parsed.owner}/${parsed.repo}`
+        GITHUB_REPO: 'https://github.com/' + parsed.owner + '/' + parsed.repo
       };
-      if (githubToken) {
-        configVars.GITHUB_TOKEN = String(githubToken).trim();
+
+      await client.patch('/apps/' + encodeURIComponent(realName) + '/config-vars', configVars);
+
+      let buildId = null;
+      let gitOk = false;
+      try {
+        const appId = created && created.id ? created.id : await herokuAppId(client, realName);
+        const pushed = await kolkrabbiDeploy(herokuApiKey, appId, parsed.owner, parsed.repo, 'main');
+        gitOk = true;
+        buildId = pushed && (pushed.build && pushed.build.id || pushed.id || pushed.build_id) || null;
+      } catch (_) {
+        gitOk = false;
       }
 
-      await client.patch(`/apps/${encodeURIComponent(realName)}/config-vars`, configVars);
-
-      const buildRes = await client.post(`/apps/${encodeURIComponent(realName)}/builds`, {
-        source_blob: {
-          url: tarballUrl,
-          version: `deploy-${Date.now()}-${i}`
-        }
-      });
+      if (!gitOk) {
+        if (!tarballBuf) throw tarballErr || new Error(privateRepoHint());
+        const build = await uploadSourceAndBuild(
+          client,
+          realName,
+          tarballBuf,
+          'deploy-' + Date.now() + '-' + i
+        );
+        buildId = build && build.id;
+      }
 
       pending.push({
         index: i,
         appName: realName,
         created: created,
-        buildId: buildRes.data && buildRes.data.id
+        buildId: buildId
       });
     } catch (err) {
       failedApps.push({
@@ -333,7 +576,7 @@ app.post('/venom/deploy-apps', async (req, res) => {
     if (item.buildStatus !== 'succeeded') {
       let message = item.buildError || 'Build failed';
       if (item.buildStatus === 'failed') {
-        message = 'Build failed. Private GitHub repos need a valid GitHub token, or check Heroku build logs.';
+        message = 'Build failed. Check Heroku build logs, or connect GitHub in Heroku Dashboard for private repos.';
       }
       failedApps.push({
         appName: item.appName,
@@ -412,17 +655,23 @@ app.post('/api/manager/bot-apps', async (req, res) => {
   }
 });
 
-async function resolveGithubFromApp(client, appName, fallbackRepo) {
+async function resolveGithubFromApp(client, apiKey, appName, fallbackRepo) {
   let token = '';
   let parsed = fallbackRepo ? parseGithubRepo(fallbackRepo) : null;
   try {
-    const cfg = await client.get(`/apps/${encodeURIComponent(appName)}/config-vars`);
+    const appId = await herokuAppId(client, appName);
+    const linked = await kolkrabbiLinkedRepo(apiKey, appId);
+    if (linked && !parsed) parsed = linked;
+    if (linked && parsed && linked.branch) parsed.branch = linked.branch;
+  } catch (_) {}
+  try {
+    const cfg = await client.get('/apps/' + encodeURIComponent(appName) + '/config-vars');
     if (!parsed) parsed = parseGithubRepo(cfg.data && cfg.data.GITHUB_REPO);
     token = (cfg.data && (cfg.data.GITHUB_TOKEN || cfg.data.GH_TOKEN)) || '';
   } catch (_) {}
   if (!parsed) {
     try {
-      const builds = await client.get(`/apps/${encodeURIComponent(appName)}/builds`);
+      const builds = await client.get('/apps/' + encodeURIComponent(appName) + '/builds');
       const list = Array.isArray(builds.data) ? builds.data : [];
       const latest = list[0] || {};
       parsed = parseGithubRepo(latest.source_blob && latest.source_blob.url);
@@ -446,28 +695,48 @@ app.post('/api/manager/restart-bot-apps', async (req, res) => {
   let restarted = 0;
   const errors = [];
 
+  const dashboardToken = await fetchHerokuGithubToken(herokuApiKey);
+  const sharedGh = String(githubToken || dashboardToken || '').trim();
+
   for (const name of appNames) {
     try {
-      const parsed = await resolveGithubFromApp(client, name, githubRepo);
-      if (parsed) {
-        const tarballUrl = await resolveTarballUrl(
-          parsed.owner,
-          parsed.repo,
-          githubToken || parsed.token
-        );
-        await client.post(`/apps/${encodeURIComponent(name)}/builds`, {
-          source_blob: {
-            url: tarballUrl,
-            version: `restart-${Date.now()}`
+      const parsed = await resolveGithubFromApp(client, herokuApiKey, name, githubRepo);
+      const gh = String(githubToken || (parsed && parsed.token) || sharedGh || '').trim();
+      const beforeId = await latestBuildId(client, name);
+      let pushed = null;
+      if (parsed && parsed.owner && parsed.repo) {
+        pushed = await pushAppFromGithub(client, herokuApiKey, name, parsed.owner, parsed.repo, gh);
+      } else {
+        try {
+          const appId = await herokuAppId(client, name);
+          const linked = await kolkrabbiLinkedRepo(herokuApiKey, appId);
+          if (linked && linked.owner && linked.repo) {
+            pushed = await pushAppFromGithub(client, herokuApiKey, name, linked.owner, linked.repo, gh);
+          } else {
+            const br = (linked && linked.branch) || 'main';
+            pushed = { method: 'github' };
+            await kolkrabbiRequest(herokuApiKey, 'post', '/apps/' + encodeURIComponent(appId) + '/github/push', { branch: br });
           }
-        });
+        } catch (_) {
+          throw new Error('GitHub repository not linked on this app. Deploy once from a GitHub repo, then Push will work without a URL.');
+        }
       }
-      await client.delete(`/apps/${encodeURIComponent(name)}/dynos`);
+      if (pushed && pushed.method === 'github') {
+        for (let t = 0; t < 8; t++) {
+          await sleep(1500);
+          const nowId = await latestBuildId(client, name);
+          if (nowId && nowId !== beforeId) break;
+        }
+      }
       restarted += 1;
     } catch (err) {
+      let message = herokuErrorMessage(err);
+      if (/not found|private|Could not download|Could not access/i.test(message)) {
+        message = privateRepoHint();
+      }
       errors.push({
         appName: name,
-        error: herokuErrorMessage(err)
+        error: message
       });
     }
     await sleep(300);
@@ -475,7 +744,7 @@ app.post('/api/manager/restart-bot-apps', async (req, res) => {
 
   return res.json({
     success: errors.length === 0,
-    message: `Pushed latest GitHub code and restarted ${restarted} app(s)${errors.length ? `, ${errors.length} failed` : ''}`,
+    message: 'Pushed latest GitHub code to ' + restarted + ' app(s)' + (errors.length ? ', ' + errors.length + ' failed' : ''),
     restarted,
     errors
   });
