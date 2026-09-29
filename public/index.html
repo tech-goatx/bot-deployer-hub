@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>Aman TechX | Deployer</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <link rel="stylesheet" href="/styles.css?v=5">
+</head>
+<body>
+  <div class="bg-gradient"></div>
+  <div class="glow-orb orb-1"></div>
+  <div class="glow-orb orb-2"></div>
+
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <div class="logo-container">
+          <div class="logo">
+            <img src="https://i.postimg.cc/63z9CfcQ/20260818-061012.jpg" alt="Aman TechX">
+          </div>
+        </div>
+        <div class="title-wrapper">
+          <h1 class="title">Aman TechX</h1>
+          <span class="floating-flag">&#127987;&#65039;</span>
+        </div>
+        <p class="subtitle">Deploy & Manage Heroku Apps</p>
+      </div>
+
+      <div class="bot-selector">
+        <button class="bot-btn active" id="venomBtn">
+          <i class="fas fa-rocket"></i> Deploy
+        </button>
+        <button class="bot-btn" id="managerBtn">
+          <i class="fas fa-server"></i> Manage
+        </button>
+      </div>
+
+      <div id="venomSection">
+        <div class="info-box">
+          <i class="fas fa-rocket"></i>
+          <div class="info-box-text">
+            <strong>Deploy Multiple Apps</strong>
+            <p>Choose how many apps to deploy, from 1 to 100</p>
+          </div>
+        </div>
+
+        <form id="venomForm" autocomplete="off">
+          <div class="form-group">
+            <label class="label"><i class="fab fa-github"></i> GitHub Repo</label>
+            <div class="input-wrapper">
+              <input type="text" id="githubRepo" class="input" placeholder="Enter your github repo">
+              <i class="fab fa-github input-icon"></i>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="label"><i class="fas fa-key"></i> Heroku API Key</label>
+            <div class="input-wrapper">
+              <input type="password" id="venomApiKey" class="input" placeholder="Enter your heroku api key">
+              <i class="fas fa-key input-icon"></i>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="label"><i class="fas fa-cube"></i> Base App Name</label>
+            <div class="input-wrapper">
+              <input type="text" id="baseAppName" class="input" placeholder="aman-md">
+              <i class="fas fa-cube input-icon"></i>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="label"><i class="fas fa-database"></i> MongoDB URL</label>
+            <div class="input-wrapper">
+              <input type="text" id="mongodbUrl" class="input" placeholder="Enter your mongo DB url">
+              <i class="fas fa-link input-icon"></i>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="label"><i class="fas fa-table"></i> Database Name</label>
+            <div class="input-wrapper">
+              <input type="text" id="dbName" class="input" placeholder="aman_md">
+              <i class="fas fa-database input-icon"></i>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="label"><i class="fas fa-layer-group"></i> Number of Apps (1–100)</label>
+            <div class="input-wrapper">
+              <input type="text" id="appCount" class="input" inputmode="numeric" maxlength="3" placeholder="Select no. between 1-100" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+              <i class="fas fa-hashtag input-icon"></i>
+            </div>
+            <p class="field-hint">Apps will be named basename1, basename2, … up to the number you choose.</p>
+          </div>
+
+          <button type="submit" class="btn-deploy" id="deployBtn">
+            <i class="fas fa-rocket"></i> Deploy <span id="deployCountLabel">1-100</span> Apps
+          </button>
+        </form>
+
+        <div class="loading" id="venomLoading">
+          <div class="spinner"></div>
+          <p class="loading-text" id="venomLoadingText">Processing...</p>
+        </div>
+
+        <div class="result-box" id="venomResults"></div>
+      </div>
+
+      <div id="managerSection" style="display:none;">
+        <div class="info-box">
+          <i class="fas fa-info-circle"></i>
+          <div class="info-box-text">
+            <strong>Heroku API Key Required</strong>
+            <p>Enter your Heroku API key to manage your apps</p>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="label">
+            <i class="fas fa-key"></i> Heroku API Key
+          </label>
+          <div class="input-wrapper">
+            <input type="password" id="apiKeyInput" class="input" placeholder="Aman TechX">
+            <i class="fas fa-key input-icon"></i>
+          </div>
+        </div>
+
+        <button class="btn-deploy" id="loadAppsBtn" style="margin-top:0;">
+          <i class="fas fa-cloud-download-alt"></i> Load Apps
+        </button>
+
+        <div class="loading" id="loadingApps">
+          <div class="spinner"></div>
+          <p class="loading-text">Loading bot apps from Heroku...</p>
+        </div>
+
+        <div id="appsContainer" style="display:none;">
+          <div class="select-all-bar" id="selectAllBar">
+            <input type="checkbox" id="selectAllApps">
+            <label for="selectAllApps">Select All Apps</label>
+            <div class="action-buttons">
+              <button class="btn-sm btn-info" onclick="copySelectedUrls()"><i class="fas fa-copy"></i> Copy URLs</button>
+              <button class="btn-sm btn-warning" onclick="restartSelectedApps()"><i class="fas fa-sync-alt"></i> Restart</button>
+              <button class="btn-sm btn-danger" onclick="deleteSelectedApps()"><i class="fas fa-trash"></i> Delete</button>
+            </div>
+          </div>
+          <div id="appsGrid" class="apps-grid"></div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <p class="footer-text">© 2026 <b>Aman TechX</b></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="copyModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title"><i class="fas fa-copy"></i> Copy URLs</h2>
+        <button class="close-modal" onclick="closeCopyModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-message">Copy URLs for <span id="copyCount" style="color:#c8c8c8;font-weight:600;">0</span> app(s)</p>
+        <div class="url-preview">
+          <pre id="urlPreview"></pre>
+        </div>
+        <button class="modal-btn" onclick="confirmCopyUrls()"><i class="fas fa-copy"></i> Copy to Clipboard</button>
+        <button class="modal-btn modal-btn-secondary" onclick="closeCopyModal()"><i class="fas fa-times"></i> Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="restartModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title"><i class="fas fa-sync-alt"></i> Restart Apps</h2>
+        <button class="close-modal" onclick="closeRestartModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-message">Push latest GitHub changes and restart <span id="restartCount" style="color:#c8c8c8;font-weight:600;">0</span> app(s)</p>
+        <button class="modal-btn" onclick="confirmRestart()"><i class="fas fa-sync-alt"></i> Confirm Restart</button>
+        <button class="modal-btn modal-btn-secondary" onclick="closeRestartModal()"><i class="fas fa-times"></i> Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="deleteModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title"><i class="fas fa-exclamation-triangle"></i> Delete Apps</h2>
+        <button class="close-modal" onclick="closeDeleteModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-message">Delete <span id="deleteCount" style="color:#d0a0a0;font-weight:600;">0</span> app(s). This cannot be undone.</p>
+        <button class="modal-btn" onclick="confirmDelete()"><i class="fas fa-trash"></i> Confirm Delete</button>
+        <button class="modal-btn modal-btn-secondary" onclick="closeDeleteModal()"><i class="fas fa-times"></i> Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="configModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title"><i class="fas fa-cog"></i> App Configuration</h2>
+        <button class="close-modal" onclick="closeConfigModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="configContent">
+          <div class="loading" style="display:block;">
+            <div class="spinner"></div>
+            <p>Loading configuration...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="editConfigModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title"><i class="fas fa-edit"></i> Edit Config Value</h2>
+        <button class="close-modal" onclick="closeEditConfig()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px;text-align:left;">
+          <label style="color:rgba(255,255,255,0.7);font-size:14px;display:block;margin-bottom:5px;">Key:</label>
+          <input type="text" id="editConfigKey" class="input" style="padding:12px 16px;" disabled>
+        </div>
+        <div style="margin-bottom:20px;text-align:left;">
+          <label style="color:rgba(255,255,255,0.7);font-size:14px;display:block;margin-bottom:5px;">Value:</label>
+          <input type="text" id="editConfigValue" class="input" style="padding:12px 16px;">
+        </div>
+        <button class="modal-btn" onclick="saveConfigEdit()"><i class="fas fa-save"></i> Save</button>
+        <button class="modal-btn" onclick="deleteConfigKey()"><i class="fas fa-trash"></i> Delete</button>
+        <button class="modal-btn modal-btn-secondary" onclick="closeEditConfig()"><i class="fas fa-times"></i> Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast">
+    <i class="fas fa-check-circle"></i>
+    <span id="toastMessage">Operation completed</span>
+  </div>
+
+  <script src="/app.js?v=5"></script>
+</body>
+</html>
