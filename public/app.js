@@ -164,7 +164,7 @@ function copySelectedUrls() {
   selected.forEach(function (appName) {
     const app = botApps.find(function (a) { return a.name === appName; });
     if (app && app.web_url) {
-      let url = app.web_url;
+      let url = String(app.web_url);
       if (url.endsWith('/')) url = url.slice(0, -1);
       lines.push('"server' + index + '": "' + url + '"');
       index += 1;
@@ -241,10 +241,13 @@ async function confirmRestart() {
   try {
     const githubEl = document.getElementById('githubRepo');
     const githubRepo = githubEl ? githubEl.value.trim() : '';
+    const tokenEl = document.getElementById('githubToken');
+    const githubToken = tokenEl ? tokenEl.value.trim() : '';
     const response = await axios.post('/api/manager/restart-bot-apps', {
       herokuApiKey: apiKey,
       appNames: apps,
-      githubRepo: githubRepo
+      githubRepo: githubRepo,
+      githubToken: githubToken
     }, { timeout: 900000 });
     if (response.data.success) {
       showToast(response.data.message);
@@ -556,6 +559,8 @@ if (venomForm) {
 
     const githubRepo = document.getElementById('githubRepo').value.trim();
     const herokuApiKey = document.getElementById('venomApiKey').value.trim();
+    const githubTokenEl = document.getElementById('githubToken');
+    const githubToken = githubTokenEl ? githubTokenEl.value.trim() : '';
     const baseAppName = document.getElementById('baseAppName').value.trim();
     const mongodbUrl = document.getElementById('mongodbUrl').value.trim();
     const dbName = document.getElementById('dbName').value.trim();
@@ -576,7 +581,7 @@ if (venomForm) {
     }
 
     venomLoading.style.display = 'block';
-    venomLoadingText.textContent = 'Deploying ' + appCount + ' apps...';
+    venomLoadingText.textContent = 'Deploying ' + appCount + ' apps and waiting for builds...';
     deployBtn.disabled = true;
     venomResults.style.display = 'none';
 
@@ -584,6 +589,7 @@ if (venomForm) {
       const response = await axios.post('/venom/deploy-apps', {
         githubRepo: githubRepo,
         herokuApiKey: herokuApiKey,
+        githubToken: githubToken,
         baseAppName: baseAppName,
         mongodbUrl: mongodbUrl,
         dbName: dbName,
